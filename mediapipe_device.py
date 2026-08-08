@@ -63,7 +63,7 @@ class MediaPipeDevice(Device):
 
         super().__init__(env)
 
-        self.GRASP_THRESHOLD = 0.04
+        self.GRASP_THRESHOLD = 0.05
 
         self.deadzone_xy = deadzone_xy
         self.deadzone_z = deadzone_z
@@ -138,6 +138,7 @@ class MediaPipeDevice(Device):
         # pogotovo na Windows-u), nego samo upisujemo sliku ovde, a NASA
         # kamera nit (_camera_loop) je stvarno prikazuje. Kljuc = ime prozora.
         self.extra_frames = {}
+        self._known_extra_windows = set()
 
         # trenutna (svaki frejm azurirana) prava 3D pozicija zgloba sake u
         # KAMERA frame-u (metri) -- dobijena RealSense deprojekcijom
@@ -569,7 +570,8 @@ class MediaPipeDevice(Device):
 
 
             # -------------------------
-            # display
+            # display -- flip PRVI, pa TEK ONDA iscrtavanje na flipovanoj
+            # slici (inace se i tekst flipuje pa se cita unazad kao u ogledalu)
             # -------------------------
 
             with self.lock:
@@ -577,6 +579,9 @@ class MediaPipeDevice(Device):
                 clutch = self._clutch_active
                 stick_display = self.stick.copy()
 
+
+            display_frame = cv2.flip(frame, 1)
+            h, w = display_frame.shape[:2]
 
 
             text = (
@@ -596,7 +601,7 @@ class MediaPipeDevice(Device):
 
 
             cv2.putText(
-                frame,
+                display_frame,
                 text,
                 (20,40),
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -608,7 +613,7 @@ class MediaPipeDevice(Device):
 
             if clutch:
                 cv2.putText(
-                    frame,
+                    display_frame,
                     f"stick: {stick_display.round(3)}",
                     (20, 75),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -621,18 +626,16 @@ class MediaPipeDevice(Device):
 
             if result.hand_landmarks:
 
-                h,w,_=frame.shape
-
-
                 for lm in result.hand_landmarks[0]:
 
-                    x=int(lm.x*w)
+                    # zrcali X (w - x) da se tackica poklopi sa flipovanom slikom
+                    x = w - 1 - int(lm.x * w)
 
-                    y=int(lm.y*h)
+                    y = int(lm.y * h)
 
 
                     cv2.circle(
-                        frame,
+                        display_frame,
                         (x,y),
                         3,
                         (0,255,0),
@@ -640,10 +643,6 @@ class MediaPipeDevice(Device):
                     )
 
 
-
-            # flip TEK sada, za prikaz -- slika I sve nacrtano na njoj
-            # (tekst, landmark tackice) flipuju se ZAJEDNO, ostaju uskladjeni
-            display_frame = cv2.flip(frame, 1)
 
             cv2.imshow(
                 "MediaPipe Teleoperation",
@@ -658,6 +657,10 @@ class MediaPipeDevice(Device):
                 extra_frames_copy = dict(self.extra_frames)
 
             for window_name, img in extra_frames_copy.items():
+                if window_name not in self._known_extra_windows:
+                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                    cv2.resizeWindow(window_name, 400, 400)
+                    self._known_extra_windows.add(window_name)
                 cv2.imshow(window_name, img)
 
 

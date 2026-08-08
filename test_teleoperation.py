@@ -51,7 +51,7 @@ import hanoi_three_env  # noqa: F401 -- import registruje "HanoiThree" u robosui
 # frame-u: X desno, Y dole, Z napred (dubina, dalje od kamere) -- gledano
 # IZ kamere KA sceni (Intel-ova standardna konvencija).
 
-SIGN_FORWARD = 1.0     # robot X (napred/nazad) <- stick[2] (RealSense dubina)
+SIGN_FORWARD = -1.0     # robot X (napred/nazad) <- stick[2] (RealSense dubina)
 SIGN_LATERAL = -1.0    # robot Y (levo/desno)   <- stick[0] (RealSense X) -- OKRENUTO jer detekcija sad radi na sirovom (neflipovanom) frejmu, kamera je "ogledalo" (gleda te licem u lice)
 SIGN_VERTICAL = -1.0   # robot Z (gore/dole)    <- stick[1] (RealSense Y, INVERTOVANO jer je dole=pozitivno u kamera frame-u)
 
@@ -59,9 +59,9 @@ SIGN_VERTICAL = -1.0   # robot Z (gore/dole)    <- stick[1] (RealSense Y, INVERT
 # i dalje odvojene konstante jer stereo dubina i lateralna preciznost mogu
 # imati razlicit "osecaj" pri koriscenju, pa vredi moci nezavisno podesiti
 K_XY = 2.0   # m/s po metru lateralnog/vertikalnog otklona -- TUNABLE
-K_Z = 2.0    # m/s po metru otklona dubine -- TUNABLE
+K_Z = 3.0    # m/s po metru otklona dubine -- TUNABLE
 
-MAX_LINEAR_SPEED = 0.3  # m/s, sigurnosno ogranicenje ukupne brzine hvataljke
+MAX_LINEAR_SPEED = 0.4  # m/s, sigurnosno ogranicenje ukupne brzine hvataljke
 
 # -- NELINEARNO SKALIRANJE (predlog mentora) --
 # Ideja: mali otkloni (fina, precizna kontrola) treba da daju JOS manju
@@ -100,12 +100,13 @@ def build_env(control_freq=30, use_cameras=True):
         source_peg_idx=0,
         target_peg_idx=2,
         randomize_pegs=False,
+        color_code_pegs=True,  # narandzasto=izvor, zeleno=cilj -- SAMO za tvoje testiranje, iskljuci za snimanje pravih demonstracija
         has_renderer=True,             # zivi prikaz (env.render()) -- OBAVEZNO True za ovu petlju
         has_offscreen_renderer=use_cameras,  # OBAVEZNO True ako koristis use_camera_obs -- ali ne iskljucuje has_renderer, mogu oba istovremeno
         use_camera_obs=use_cameras,
         camera_names=["sideview", "robot0_eye_in_hand"] if use_cameras else None,
-        camera_heights=128 if use_cameras else None,
-        camera_widths=128 if use_cameras else None,
+        camera_heights=256 if use_cameras else None,
+        camera_widths=256 if use_cameras else None,
         control_freq=control_freq,
         horizon=2000,            # Hanoj je slozeniji zadatak od Lift-a, daj vise vremena
         ignore_done=True,

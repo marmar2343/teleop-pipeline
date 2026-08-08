@@ -84,6 +84,7 @@ class HanoiThree(ManipulationEnv):
         target_peg_idx=2,
         randomize_pegs=False,
         peg_spacing=0.18,
+        color_code_pegs=False,
         has_renderer=False,
         has_offscreen_renderer=True,
         render_camera="frontview",
@@ -126,6 +127,7 @@ class HanoiThree(ManipulationEnv):
         self.source_peg_idx = source_peg_idx
         self.target_peg_idx = target_peg_idx
         self.randomize_pegs = randomize_pegs
+        self.color_code_pegs = color_code_pegs
 
         # polovine ivica kocki (m) -- opadajuce velicine, najveca ide na dno
         self.half_heights = {"cubeA": 0.025, "cubeB": 0.020, "cubeC": 0.015}
@@ -274,13 +276,33 @@ class HanoiThree(ManipulationEnv):
         # XML elementu PRE spajanja u scenu (get_obj().set("pos", ...)) jer
         # staticni objekti nemaju joint preko kog bi se pozicija menjala u
         # _reset_internal, kao sto to radimo za kocke.
+        #
+        # color_code_pegs=True boji izvorni/ciljni klin razlicito -- KORISNO
+        # ZA TVOJE SOPSTVENO TESTIRANJE, ali namerno OFF po difoltu: VLA
+        # model treba da uci "koji je cilj" iz JEZICKE instrukcije, ne iz
+        # boje koja ne postoji na pravom stolu van simulacije. Iskljuci ovo
+        # (podrazumevano vrednost) kad snimas prave demonstracije za dataset.
+        #
+        # NAPOMENA: boje se postavljaju OVDE, JEDNOM, na osnovu vrednosti
+        # source_peg_idx/target_peg_idx iz konstruktora -- ako kasnije
+        # koristis randomize_pegs=True, boje ce odgovarati samo PRVOM
+        # (konstrukcionom) izboru, ne ce se azurirati na svaki reset. Za
+        # taj slucaj, oslanjaj se na konzolni ispis izvor/cilj klina umesto
+        # na boju.
         self.peg_markers = []
         marker_z = self.table_offset[2] + 0.001  # tik iznad povrsine stola
         for idx, offset in self.peg_offsets.items():
+            if self.color_code_pegs and idx == self.source_peg_idx:
+                rgba = [0.9, 0.55, 0.1, 0.8]   # narandzasto = IZVOR
+            elif self.color_code_pegs and idx == self.target_peg_idx:
+                rgba = [0.15, 0.75, 0.15, 0.8]  # zeleno = CILJ
+            else:
+                rgba = [0.25, 0.25, 0.25, 0.6]  # neutralno sivo (podrazumevano, ili pomocni klin)
+
             marker = CylinderObject(
                 name=f"peg{idx}_marker",
                 size=[0.045, 0.001],  # radijus, polovina visine -- vrlo tanak disk
-                rgba=[0.25, 0.25, 0.25, 0.6],
+                rgba=rgba,
                 joints=None,
                 obj_type="visual",
             )
@@ -316,6 +338,8 @@ class HanoiThree(ManipulationEnv):
                 src, tgt = self.rng.choice(3, size=2, replace=False)
                 self.source_peg_idx, self.target_peg_idx = int(src), int(tgt)
             # ako randomize_pegs=False, ostaju vrednosti iz konstruktora
+
+            print(f"[HanoiThree] izvorni klin: {self.source_peg_idx}, ciljni klin: {self.target_peg_idx}")
 
             # sitan xy jitter (isti za sve tri kocke, da ostanu poravnate) --
             # sprecava da model nauci fiksnu, uvek identicnu pocetnu pozu
@@ -421,13 +445,11 @@ if __name__ == "__main__":
         has_renderer=True,
         has_offscreen_renderer=False,
         use_camera_obs=False,
-        control_freq=60,
+        control_freq=20,
         horizon=200,
         seed=42,
     )
 
-    for i in range(env.sim.model.nsite):
-        print(i, env.sim.model.site_id2name(i))
     obs = env.reset()
     print("Observation keys:", list(obs.keys()))
     print(f"Izvorni klin: {env.source_peg_idx}, ciljni klin: {env.target_peg_idx}")
