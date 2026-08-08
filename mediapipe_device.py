@@ -59,11 +59,17 @@ class MediaPipeDevice(Device):
         deadzone_xy=0.006,   # metri -- lateralno/vertikalno (RealSense X/Y), realna dubina je preciznija od MediaPipe procene pa moze manja mrtva zona
         deadzone_z=0.006,    # metri -- dubina (RealSense Z)
         stick_alpha=0.25,    # EMA glacanje NAD dead-zoned vrednoscu
+        grasp_close_threshold=0.035,  # ISPOD ovoga: pusti->zatvori (stroziji prag)
+        grasp_open_threshold=0.05,    # IZNAD ovoga: zatvoreno->otvori (blazi prag) -- razlika izmedju ova dva je HISTEREZA
+        grasp_alpha=0.4,               # EMA glacanje NAD sirovim pinch rastojanjem, PRE odluke
     ):
 
         super().__init__(env)
 
-        self.GRASP_THRESHOLD = 0.05
+        self.GRASP_CLOSE_THRESHOLD = grasp_close_threshold
+        self.GRASP_OPEN_THRESHOLD = grasp_open_threshold
+        self.grasp_alpha = grasp_alpha
+        self._pinch_distance_smooth = grasp_open_threshold  # pocni kao "otvoreno"
 
         self.deadzone_xy = deadzone_xy
         self.deadzone_z = deadzone_z
@@ -107,6 +113,7 @@ class MediaPipeDevice(Device):
         self.rs_intrinsics = color_profile.as_video_stream_profile().get_intrinsics()
 
         self.frame_timestamp_ms = 0
+        self._camera_start_time = time.perf_counter()
 
 
 
@@ -417,7 +424,11 @@ class MediaPipeDevice(Device):
             )
 
 
-            self.frame_timestamp_ms += 33
+            # STVARNO proteklo vreme, ne fiksnih +33ms -- ako isporuka
+            # frejmova ikad zastane/ubrza, MediaPipe-ov VIDEO mod (koji
+            # interno koristi timestamp za sopstveno vremensko pracenje)
+            # sad dobija tacnu informaciju, ne pretpostavku
+            self.frame_timestamp_ms = int((time.perf_counter() - self._camera_start_time) * 1000)
 
 
 
@@ -458,22 +469,39 @@ class MediaPipeDevice(Device):
                 wrist_image = image_landmarks[0]
 
                 # -------------------------
-                # GRASP DETECTION (nepromenjeno -- world landmarks, pinch distanca)
+                # GRASP DETECTION -- EMA izgladjivanje + histereza (dva praga)
+                # umesto trenutne, nefiltrirane odluke na SVAKI frejm -- jedan
+                # los frejm (okluzija, motion blur) vise NE moze sam da
+                # izazove otpustanje kocke usred hvatanja
                 # -------------------------
 
                 thumb_tip = world_landmarks[4]
                 index_tip = world_landmarks[8]
 
-                distance = np.sqrt(
+                raw_distance = np.sqrt(
                     (thumb_tip.x - index_tip.x)**2 +
                     (thumb_tip.y - index_tip.y)**2 +
                     (thumb_tip.z - index_tip.z)**2
                 )
 
-                is_grasping = distance < self.GRASP_THRESHOLD
-
-
                 with self.lock:
+                    self._pinch_distance_smooth = (
+                        self.grasp_alpha * raw_distance
+                        + (1 - self.grasp_alpha) * self._pinch_distance_smooth
+                    )
+                    smoothed = self._pinch_distance_smooth
+
+                    currently_grasping = self.grasp_states[self.active_robot][self.active_arm_index]
+
+                    if currently_grasping:
+                        # vec drzi -- pusti SAMO ako rastojanje ubedljivo
+                        # preraste GORNJI (blazi) prag
+                        is_grasping = smoothed < self.GRASP_OPEN_THRESHOLD
+                    else:
+                        # trenutno otvoreno -- zatvori SAMO ako rastojanje
+                        # padne ispod DONJEG (strozeg) praga
+                        is_grasping = smoothed < self.GRASP_CLOSE_THRESHOLD
+
                     self.grasp_states[
                         self.active_robot
                     ][self.active_arm_index] = is_grasping
