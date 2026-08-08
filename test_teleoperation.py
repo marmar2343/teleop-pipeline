@@ -1,29 +1,26 @@
 """
 test_teleoperation.py
 
-v3 -- RATE CONTROL + 2.5D, zamenjuje raniji position-control pristup koji je
-zahtevao punu 3x3 rotacionu kalibraciju (calibration.py) i bio osetljiv na
-MediaPipe-ovu monokularnu gresku skale.
+v4 -- RATE CONTROL + prava RGB-D dubina (RealSense D405), zamenjuje v3
+(2.5D: slika X/Y + MediaPipe-ova NAUCENA world-landmark Z procena).
 
 STA SE PROMENILO I ZASTO:
 
-1) device.stick (iz mediapipe_device.py v3) je "otklon dzojstika" od
-   referentne tacke, NE apsolutna pozicija. X/Y dolaze sa SLIKE (pouzdanije),
-   Z i dalje iz world landmarks (manje pouzdano, ali sad manje bitno -- videti nize).
+1) device.stick (iz mediapipe_device.py v4) je i dalje "otklon dzojstika"
+   od referentne tacke, ali SADA sve tri komponente dolaze iz PRAVE
+   dubinske deprojekcije (RealSense), ne mesavine slika-frakcija +
+   naucena-Z kao pre. Sve tri ose su sada u ISTIM (pravim, metarskim)
+   jedinicama.
 
-2) Umesto target = referenca + hand_delta (position control), sada:
-       target += velocity * dt   (integrise se SVAKI korak, rate control)
-   Greska u proceni skale sad utice na BRZINU kretanja za dati otklon ruke,
-   ne na finalnu poziciju hvataljke -- mnogo tolerantnije na netacnu
-   MediaPipe procenu.
+2) target += velocity * dt (rate control) OSTAJE nepromenjeno -- i dalje
+   vredno zadrzati zbog glatkoce/bezbednosti, samo sto ulazni signal sad
+   dolazi sa mnogo manje sistematske greske nego pre.
 
-3) Rotaciona kalibracija (calibrate_camera_to_robot_rotation) VISE NIJE
-   POTREBNA -- mapiranje ose je sada EKSPLICITNO postavljeno ispod
-   (SIGN_* konstante), umesto fitovano iz 3 nesigurna pokreta. Mnogo
-   robusnije, samo treba proveriti/okrenuti znake ako se robot krece u
-   pogresnom smeru (uputstvo ispod). calibrate_scale takodje nije potrebna
-   iz istog razloga -- K_XY/K_Z su obicni gain-ovi za podesavanje, ne
-   merenje "prave" fizicke skale.
+3) Rotaciona kalibracija (calibrate_camera_to_robot_rotation iz
+   calibration.py) i dalje NIJE pozvana ovde -- mapiranje ose je i dalje
+   EKSPLICITNO postavljeno preko SIGN_* konstanti ispod. Ako se ikad vratis
+   na fitovanu rotaciju, sad bi radila na mnogo cistijim podacima (prava
+   dubina, ne monokularna procena) nego kad smo je prvi put probale.
 
 PRVI TEST POSLE OVE IZMENE: pokreni, drzi SPACE, pomeri ruku SAMO ulevo-
 udesno i proveri da li robot ide u ocekivanom smeru. Ako ne, okreni
@@ -32,46 +29,65 @@ SIGN_LATERAL. Ponovi za gore-dole (SIGN_VERTICAL) i napred-nazad (SIGN_FORWARD).
 
 import time
 
+import cv2
 import numpy as np
 import robosuite as suite
+import robosuite.macros as macros
+
+macros.IMAGE_CONVENTION = "opencv"  # ispravna (ne-naopacka) orijentacija slike -- MORA pre suite.make()
+
 from robosuite.controllers import load_composite_controller_config
 from robosuite.wrappers import VisualizationWrapper
 
 from mediapipe_device import MediaPipeDevice
 from ik_solver import DLS_IK_Solver
-import hanoi_three_env  
+import hanoi_three_env  # noqa: F401 -- import registruje "HanoiThree" u robosuite (EnvMeta metaklasa)
 
 
 # ============================================================
 # MAPIRANJE OSA -- jedino mesto koje dirati kad menjas smerove
 # ============================================================
-# device.stick[0] = otklon na SLICI, levo-desno (X na slici)
-# device.stick[1] = otklon na SLICI, gore-dole (Y na slici, dole = pozitivno!)
-# device.stick[2] = otklon dubine iz world landmarks (Z, metri)
+# device.stick je SADA prava 3D tacka (RealSense deprojekcija), u kamera
+# frame-u: X desno, Y dole, Z napred (dubina, dalje od kamere) -- gledano
+# IZ kamere KA sceni (Intel-ova standardna konvencija).
 
-SIGN_FORWARD = 1.0     # robot X (napred/nazad) <- stick[2] (dubina)
-SIGN_LATERAL = 1.0     # robot Y (levo/desno)   <- stick[0] (slika X)
-SIGN_VERTICAL = -1.0   # robot Z (gore/dole)    <- stick[1] (slika Y, INVERTOVANO jer dole=pozitivno na slici)
+SIGN_FORWARD = 1.0     # robot X (napred/nazad) <- stick[2] (RealSense dubina)
+SIGN_LATERAL = -1.0    # robot Y (levo/desno)   <- stick[0] (RealSense X) -- OKRENUTO jer detekcija sad radi na sirovom (neflipovanom) frejmu, kamera je "ogledalo" (gleda te licem u lice)
+SIGN_VERTICAL = -1.0   # robot Z (gore/dole)    <- stick[1] (RealSense Y, INVERTOVANO jer je dole=pozitivno u kamera frame-u)
 
-K_XY = 0.6   # m/s po jedinici normalizovanog otklona na slici (0-1 opseg) -- TUNABLE
-K_Z = 2.5    # m/s po metru otklona dubine -- TUNABLE, verovatno treba podesiti empirijski
+# K_XY i K_Z su SADA uporedivije po redu velicine (obe ose su prave metre) --
+# i dalje odvojene konstante jer stereo dubina i lateralna preciznost mogu
+# imati razlicit "osecaj" pri koriscenju, pa vredi moci nezavisno podesiti
+K_XY = 2.0   # m/s po metru lateralnog/vertikalnog otklona -- TUNABLE
+K_Z = 2.0    # m/s po metru otklona dubine -- TUNABLE
 
-MAX_LINEAR_SPEED = 0.15  # m/s, sigurnosno ogranicenje ukupne brzine hvataljke
+MAX_LINEAR_SPEED = 0.3  # m/s, sigurnosno ogranicenje ukupne brzine hvataljke
 
-# nelinearno skaliranje
+# -- NELINEARNO SKALIRANJE (predlog mentora) --
+# Ideja: mali otkloni (fina, precizna kontrola) treba da daju JOS manju
+# brzinu nego linearno, a veliki otkloni (namerno brzo kretanje) treba da
+# ostanu blizu pune brzine. STICK_MAX_* su "ocekivani maksimalni" otkloni
+# posle deadzone-a, samo za normalizaciju krive -- ne moraju biti savrseno
+# tacni, sluze da kriva bude u razumnom opsegu.
 CURVE_EXPONENT = 2.0   # 1.0 = linearno (bez efekta), 2.0 = kvadratno, veci broj = izrazenija razlika fino/brzo
-STICK_MAX_XY = 0.25    # ocekivan maksimalan otklon na slici posle deadzone-a
-STICK_MAX_Z = 0.12     # ocekivan maksimalan otklon dubine (m) posle deadzone-a
+STICK_MAX_XY = 0.15    # ocekivan maksimalan lateralni/vertikalni otklon (m) posle deadzone-a
+STICK_MAX_Z = 0.15     # ocekivan maksimalan otklon dubine (m) posle deadzone-a -- sad uporediv sa XY, jer je i Z prava metarska mera
 
 
 def _apply_curve(value, max_expected, exponent):
-    
+    """
+    Nelinearna kriva odziva -- cuva znak, normalizuje na [0,1] u odnosu na
+    max_expected, stepenuje, pa vraca u originalnu skalu. Sa exponent=2:
+    otklon od 50% max-a daje SAMO 25% izlaza (fina kontrola blizu centra),
+    dok pun otklon i dalje daje pun izlaz (brzo kretanje kad namerno
+    odmakenes ruku daleko od reference).
+    """
     normalized = np.clip(abs(value) / max_expected, 0.0, 1.0)
     shaped = normalized ** exponent
     return np.sign(value) * shaped * max_expected
 
 
-def build_env(control_freq=30):
+def build_env(control_freq=30, use_cameras=True):
     controller_config = load_composite_controller_config(controller="BASIC")
     controller_config["body_parts"]["right"]["type"] = "JOINT_POSITION"
     controller_config["body_parts"]["right"]["input_type"] = "absolute"
@@ -84,9 +100,12 @@ def build_env(control_freq=30):
         source_peg_idx=0,
         target_peg_idx=2,
         randomize_pegs=False,
-        has_renderer=True,
-        has_offscreen_renderer=False,
-        use_camera_obs=False,   # HanoiThree podrazumevano trazi True -- ovde nam ne treba jos (Faza 4)
+        has_renderer=True,             # zivi prikaz (env.render()) -- OBAVEZNO True za ovu petlju
+        has_offscreen_renderer=use_cameras,  # OBAVEZNO True ako koristis use_camera_obs -- ali ne iskljucuje has_renderer, mogu oba istovremeno
+        use_camera_obs=use_cameras,
+        camera_names=["sideview", "robot0_eye_in_hand"] if use_cameras else None,
+        camera_heights=128 if use_cameras else None,
+        camera_widths=128 if use_cameras else None,
         control_freq=control_freq,
         horizon=2000,            # Hanoj je slozeniji zadatak od Lift-a, daj vise vremena
         ignore_done=True,
@@ -168,6 +187,15 @@ if __name__ == "__main__":
             obs, reward, done, info = env.step(action)
             env.render()
             time.sleep(dt)
+
+            # -- predaj oba kamera strima device-u da ih ON prikaze (u SVOM
+            # thread-u) -- NIKAD ne zovi cv2.imshow direktno ovde, to je
+            # bio uzrok da se prozori tiho ne otvaraju (dva thread-a rade
+            # cv2 GUI istovremeno)
+            if "sideview_image" in obs:
+                device.update_extra_frame("sideview", cv2.cvtColor(obs["sideview_image"], cv2.COLOR_RGB2BGR))
+            if "robot0_eye_in_hand_image" in obs:
+                device.update_extra_frame("robot0_eye_in_hand", cv2.cvtColor(obs["robot0_eye_in_hand_image"], cv2.COLOR_RGB2BGR))
 
             step_count += 1
             if step_count % 10 == 0:
