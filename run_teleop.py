@@ -107,6 +107,12 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info):
     (dic["successful"] -- automatski prati DataCollectionWrapper preko
     _check_success() na svakom koraku).
 
+    NAPOMENA -- APPEND, ne prepisivanje: ako @out_dir/demo.hdf5 VEC postoji
+    (npr. iz prethodne sesije), NOVE uspesne epizode se DODAJU, numerisanje
+    (demo_N) nastavlja tamo gde je proslo pokretanje stalo -- ne pravi se
+    nov fajl niti se stari brise. Da zapocnes NOV, prazan dataset, obrisi
+    demo.hdf5 rucno.
+
     Struktura izlaznog hdf5:
         data (grupa)
             date, time, repository_version, env, env_info (atributi)
@@ -117,14 +123,33 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info):
             demo_2, ...
     """
     hdf5_path = os.path.join(out_dir, "demo.hdf5")
-    f = h5py.File(hdf5_path, "w")
 
-    grp = f.create_group("data")
+    file_existed = os.path.exists(hdf5_path)
+    f = h5py.File(hdf5_path, "a")  # "a" = append -- pravi fajl ako ne postoji, otvara za dopisivanje ako postoji
 
-    num_eps = 0
-    env_name = None
+    if "data" not in f:
+        grp = f.create_group("data")
+    else:
+        grp = f["data"]
 
-    for ep_directory in os.listdir(directory):
+    # nastavi numerisanje od najveceg POSTOJECEG demo_N (0 ako je fajl nov)
+    existing_nums = [int(k.split("_")[1]) for k in grp.keys() if k.startswith("demo_")]
+    num_eps = max(existing_nums) if existing_nums else 0
+    n_before = num_eps
+
+    # KLJUCNO za append mod: gather() ponovo skenira CEO tmp_directory
+    # svaki put (ne samo nove foldere), pa bez ovoga bi se VEC obradjene
+    # epizode dodale PONOVO kao duplikat svaki put kad se gather() pozove
+    # posle sledece demonstracije unutar ISTE sesije. Cuvamo listu vec
+    # obradjenih imena foldera kao atribut (perzistentno i kroz sesije).
+    processed = set(json.loads(grp.attrs.get("processed_episodes", "[]")))
+
+    env_name = grp.attrs.get("env", None)
+
+    for ep_directory in sorted(os.listdir(directory)):  # sortirano -- ime foldera sadrzi timestamp, pa je ovo hronoloski red
+        if ep_directory in processed:
+            continue  # vec obradjeno u ranijem pozivu gather()-a, preskoci da ne dupliras
+
         state_paths = os.path.join(directory, ep_directory, "state_*.npz")
         states = []
         actions = []
@@ -140,7 +165,9 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info):
             success = success or dic["successful"]
 
         if len(states) == 0:
-            continue
+            continue  # jos NIJE flush-ovano na disk -- NE oznacavaj kao obradjeno, probaj ponovo sledeci put
+
+        processed.add(ep_directory)  # tek OVDE, kad znamo da folder stvarno ima sadrzaj
 
         if success:
             print(f"[gather] {ep_directory}: USPESNA, cuvam u dataset")
@@ -163,6 +190,8 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info):
         else:
             print(f"[gather] {ep_directory}: NEUSPESNA, preskacem")
 
+    grp.attrs["processed_episodes"] = json.dumps(sorted(processed))
+
     now = datetime.datetime.now()
     grp.attrs["date"] = "{}-{}-{}".format(now.month, now.day, now.year)
     grp.attrs["time"] = "{}:{}:{}".format(now.hour, now.minute, now.second)
@@ -171,7 +200,9 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info):
     grp.attrs["env_info"] = env_info
 
     f.close()
-    print(f"[gather] Ukupno {num_eps} uspesnih epizoda u {hdf5_path}")
+    added = num_eps - n_before
+    verb = "dopisano u postojeci" if file_existed else "sacuvano u nov"
+    print(f"[gather] {verb} fajl -- {added} novih ovog puta, ukupno {num_eps} uspesnih epizoda u {hdf5_path}")
     return hdf5_path
 
 
@@ -206,8 +237,8 @@ def build_env(control_freq=30, live_camera_names=("agentview",)):
         **config,
         source_peg_idx=0,
         target_peg_idx=2,
-        randomize_pegs=False,
-        color_code_pegs=False,  # OFF za prave demonstracije -- VLA ne treba boju kao signal cilja
+        randomize_pegs=True,   # nasumican izvor/cilj na svaki reset -- vise raznovrsnosti u datasetu
+        color_code_pegs=True,  # narandzasto=izvor, zeleno=cilj -- sad ispravno prati randomize_pegs (dinamicki, ne samo pri pravljenju scene)
         has_renderer=True,
         hard_reset=False,  # KLJUCNO -- bez ovoga, svaki env.reset() pravi NOV env.sim
                            # objekat, i solver (konstruisan JEDNOM, pre petlje demonstracija)
@@ -373,16 +404,20 @@ if __name__ == "__main__":
 
     # -- omotaji za snimanje: DataCollectionWrapper SPOLJA, redosled preuzet
     # direktno iz zvanicnog robosuite skripta --
+    # tmp_directory OSTAJE per-sesijski (privremeno, ciscenje nije bitno --
+    # sadrzaj se svaki put SPOJI u trajni new_dir/demo.hdf5 pre nego sto
+    # sesija zavrsi)
     tmp_directory = "/tmp/{}".format(str(time.time()).replace(".", "_"))
     env = DataCollectionWrapper(env, tmp_directory)
 
-    out_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demonstracije")
-    t1, t2 = str(time.time()).split(".")
-    new_dir = os.path.join(out_directory, "{}_{}".format(t1, t2))
+    # FIKSNA putanja -- ista kroz SVE sesije/pokretanja, ne novi timestamp
+    # svaki put -- gather_demonstrations_as_hdf5() dopisuje (append), pa
+    # demo_1, demo_2, demo_3... nastavljaju kroz vise dana/sesija u ISTI fajl
+    new_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demonstracije", "hanoi_dataset")
     os.makedirs(new_dir, exist_ok=True)
 
     print(f"Sirovi snimci (privremeno): {tmp_directory}")
-    print(f"Finalni .hdf5 posle svake demonstracije: {new_dir}/demo.hdf5")
+    print(f"Finalni .hdf5 (dopisuje se kroz sve sesije): {new_dir}/demo.hdf5")
     print("Ctrl+C u terminalu da prekines seriju snimanja u bilo kom trenutku.\n")
 
     try:
