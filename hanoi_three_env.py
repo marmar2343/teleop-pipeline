@@ -277,32 +277,18 @@ class HanoiThree(ManipulationEnv):
         # staticni objekti nemaju joint preko kog bi se pozicija menjala u
         # _reset_internal, kao sto to radimo za kocke.
         #
-        # color_code_pegs=True boji izvorni/ciljni klin razlicito -- KORISNO
-        # ZA TVOJE SOPSTVENO TESTIRANJE, ali namerno OFF po difoltu: VLA
-        # model treba da uci "koji je cilj" iz JEZICKE instrukcije, ne iz
-        # boje koja ne postoji na pravom stolu van simulacije. Iskljuci ovo
-        # (podrazumevano vrednost) kad snimas prave demonstracije za dataset.
-        #
-        # NAPOMENA: boje se postavljaju OVDE, JEDNOM, na osnovu vrednosti
-        # source_peg_idx/target_peg_idx iz konstruktora -- ako kasnije
-        # koristis randomize_pegs=True, boje ce odgovarati samo PRVOM
-        # (konstrukcionom) izboru, ne ce se azurirati na svaki reset. Za
-        # taj slucaj, oslanjaj se na konzolni ispis izvor/cilj klina umesto
-        # na boju.
+        # Boje se OVDE postavljaju SAMO kao pocetna (neutralno sivo)
+        # vrednost -- STVARNO bojenje (kad je color_code_pegs=True) radi
+        # _reset_internal preko sim.model.geom_rgba, na SVAKI reset, sto
+        # ispravno podrzava i randomize_pegs=True (izvor/cilj se mogu
+        # promeniti svaki put, boje prate).
         self.peg_markers = []
         marker_z = self.table_offset[2] + 0.001  # tik iznad povrsine stola
         for idx, offset in self.peg_offsets.items():
-            if self.color_code_pegs and idx == self.source_peg_idx:
-                rgba = [0.9, 0.55, 0.1, 0.8]   # narandzasto = IZVOR
-            elif self.color_code_pegs and idx == self.target_peg_idx:
-                rgba = [0.15, 0.75, 0.15, 0.8]  # zeleno = CILJ
-            else:
-                rgba = [0.25, 0.25, 0.25, 0.6]  # neutralno sivo (podrazumevano, ili pomocni klin)
-
             marker = CylinderObject(
                 name=f"peg{idx}_marker",
                 size=[0.045, 0.001],  # radijus, polovina visine -- vrlo tanak disk
-                rgba=rgba,
+                rgba=[0.25, 0.25, 0.25, 0.6],  # neutralno sivo, stvarna boja se postavlja u _reset_internal
                 joints=None,
                 obj_type="visual",
             )
@@ -326,6 +312,14 @@ class HanoiThree(ManipulationEnv):
             "cubeC": self.sim.model.body_name2id(self.cubeC.root_body),
         }
 
+        # geom ID markera klinova, po indeksu (0,1,2) -- za DINAMICKO
+        # bojenje u _reset_internal (bitno kad randomize_pegs=True: boje se
+        # moraju osveziti na SVAKI reset, ne samo jednom pri pravljenju scene)
+        self.peg_marker_geom_ids = {}
+        for idx, marker in enumerate(self.peg_markers):
+            geom_name = marker.visual_geoms[0] if marker.visual_geoms else marker.contact_geoms[0]
+            self.peg_marker_geom_ids[idx] = self.sim.model.geom_name2id(geom_name)
+
     def _reset_internal(self):
         """Postavlja kompletnu, VEC slozenu kulu na izvorni klin (source_peg_idx).
         Ovo je kljucna razlika u odnosu na standardni robosuite placement_initializer,
@@ -340,6 +334,16 @@ class HanoiThree(ManipulationEnv):
             # ako randomize_pegs=False, ostaju vrednosti iz konstruktora
 
             print(f"[HanoiThree] izvorni klin: {self.source_peg_idx}, ciljni klin: {self.target_peg_idx}")
+
+            if self.color_code_pegs:
+                for idx in range(3):
+                    if idx == self.source_peg_idx:
+                        rgba = [0.9, 0.55, 0.1, 0.8]    # narandzasto = IZVOR
+                    elif idx == self.target_peg_idx:
+                        rgba = [0.15, 0.75, 0.15, 0.8]  # zeleno = CILJ
+                    else:
+                        rgba = [0.25, 0.25, 0.25, 0.6]  # neutralno sivo = pomocni
+                    self.sim.model.geom_rgba[self.peg_marker_geom_ids[idx]] = rgba
 
             # sitan xy jitter (isti za sve tri kocke, da ostanu poravnate) --
             # sprecava da model nauci fiksnu, uvek identicnu pocetnu pozu
