@@ -52,16 +52,16 @@ import hanoi_three_env  # noqa: F401 -- import registruje "HanoiThree" u robosui
 # IZ kamere KA sceni (Intel-ova standardna konvencija).
 
 SIGN_FORWARD = -1.0     # robot X (napred/nazad) <- stick[2] (RealSense dubina)
-SIGN_LATERAL = -1.0    # robot Y (levo/desno)   <- stick[0] (RealSense X) -- OKRENUTO jer detekcija sad radi na sirovom (neflipovanom) frejmu, kamera je "ogledalo" (gleda te licem u lice)
+SIGN_LATERAL = 1.0    # robot Y (levo/desno)   <- stick[0] (RealSense X) -- OKRENUTO jer detekcija sad radi na sirovom (neflipovanom) frejmu, kamera je "ogledalo" (gleda te licem u lice)
 SIGN_VERTICAL = -1.0   # robot Z (gore/dole)    <- stick[1] (RealSense Y, INVERTOVANO jer je dole=pozitivno u kamera frame-u)
 
 # K_XY i K_Z su SADA uporedivije po redu velicine (obe ose su prave metre) --
 # i dalje odvojene konstante jer stereo dubina i lateralna preciznost mogu
 # imati razlicit "osecaj" pri koriscenju, pa vredi moci nezavisno podesiti
 K_XY = 2.0   # m/s po metru lateralnog/vertikalnog otklona -- TUNABLE
-K_Z = 3.0    # m/s po metru otklona dubine -- TUNABLE
+K_Z = 2.0    # m/s po metru otklona dubine -- TUNABLE
 
-MAX_LINEAR_SPEED = 0.4  # m/s, sigurnosno ogranicenje ukupne brzine hvataljke
+MAX_LINEAR_SPEED = 0.3  # m/s, sigurnosno ogranicenje ukupne brzine hvataljke
 
 # -- NELINEARNO SKALIRANJE (predlog mentora) --
 # Ideja: mali otkloni (fina, precizna kontrola) treba da daju JOS manju
@@ -104,9 +104,9 @@ def build_env(control_freq=30, use_cameras=True):
         has_renderer=True,             # zivi prikaz (env.render()) -- OBAVEZNO True za ovu petlju
         has_offscreen_renderer=use_cameras,  # OBAVEZNO True ako koristis use_camera_obs -- ali ne iskljucuje has_renderer, mogu oba istovremeno
         use_camera_obs=use_cameras,
-        camera_names=["sideview", "robot0_eye_in_hand"] if use_cameras else None,
-        camera_heights=256 if use_cameras else None,
-        camera_widths=256 if use_cameras else None,
+        camera_names=["sideview", "robot0_eye_in_hand", "agentview"] if use_cameras else None,
+        camera_heights=320 if use_cameras else None,   # uskladjeno sa dashboard tile_size -- bez razvlacenja
+        camera_widths=320 if use_cameras else None,
         control_freq=control_freq,
         horizon=2000,            # Hanoj je slozeniji zadatak od Lift-a, daj vise vremena
         ignore_done=True,
@@ -197,12 +197,24 @@ if __name__ == "__main__":
                 device.update_extra_frame("sideview", cv2.cvtColor(obs["sideview_image"], cv2.COLOR_RGB2BGR))
             if "robot0_eye_in_hand_image" in obs:
                 device.update_extra_frame("robot0_eye_in_hand", cv2.cvtColor(obs["robot0_eye_in_hand_image"], cv2.COLOR_RGB2BGR))
+            if "agentview_image" in obs:
+                device.update_extra_frame("agentview", cv2.cvtColor(obs["agentview_image"], cv2.COLOR_RGB2BGR))
 
             step_count += 1
+            success = env.env._check_success()  # env.env: HanoiThree ispod VisualizationWrapper-a
+            ee_now = solver.get_eef_position()
+            device.update_status([
+                f"Clutch: {'DA' if clutch_now else 'ne'}",
+                f"Grasp: {'DA' if device.grasp else 'ne'}",
+                f"EE: {ee_now.round(3)}",
+                f"Stick: {stick.round(3)}",
+                "",
+                "RESENO! :)" if success else "u toku...",
+            ])
+
             if step_count % 10 == 0:
-                success = env.env._check_success()  # env.env: HanoiThree ispod VisualizationWrapper-a
                 status = "RESENO! 🎉" if success else "u toku"
-                print(f"clutch={clutch_now}, stick={stick.round(3)}, ee={solver.get_eef_position().round(3)}, status={status}")
+                print(f"clutch={clutch_now}, stick={stick.round(3)}, ee={ee_now.round(3)}, status={status}")
 
             if done:
                 print("Epizoda zavrsena, resetujem...")

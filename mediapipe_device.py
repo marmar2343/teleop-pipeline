@@ -5,16 +5,13 @@ MediaPipe hand teleoperation device za robosuite -- v4, RATE CONTROL + RealSense
 
 PROMENA U ODNOSU NA v3 (2.5D: slika X/Y + MediaPipe world-landmark Z):
 
-  - X/Y/Z SADA sve tri dolaze iz PRAVE dubinske deprojekcije: MediaPipe
-    detektuje piksel poziciju zgloba sake na slici (2D, kao i pre), a
-    RealSense depth frejm daje IZMERENU dubinu na tom pikselu -- pa
-    rs2_deproject_pixel_to_point pretvara (piksel, dubina) u pravu 3D
-    tacku u kamera frame-u (metri). Vise NEMA mesanja jedinica -- sve tri
-    komponente self.stick su sada u istim, PRAVIM metarskim jedinicama.
-  - hand_world_landmarks (MediaPipe naucena metricka procena) se i dalje
-    koristi, ali SAMO za grasp detekciju (relativno rastojanje palac-
-    kaziprst) -- ne vise za apsolutnu poziciju, pa mu tacnost apsolutne
-    dubine tu i nije bitna.
+  - X/Y/Z pozicije zgloba I SADA merenje pinch-a (grasp) idu preko PRAVE
+    dubinske deprojekcije -- hand_world_landmarks (MediaPipe naucena
+    metricka procena) se VISE NIGDE ne koristi za merenje. Razlog izmene
+    pinch-a: hand_world_landmarks ima priblizno fiksnu apsolutnu gresku po
+    vrhu prsta -- zanemarljivo za veliko rastojanje otvorene sake, ali
+    DOMINANTNO kod sitnog pinch rastojanja, otud vrednosti koje su jako
+    varirale sa udaljenoscu od kamere dok je stara verzija to koristila.
   - VAZNA SUPTILNOST: MediaPipe detekcija i deprojekcija rade na SIROVOM
     (neflipovanom) frejmu -- rs2_deproject_pixel_to_point zahteva piksel
     koordinate koje odgovaraju stvarnim intrinsics-ima senzora. Flip
@@ -146,6 +143,7 @@ class MediaPipeDevice(Device):
         # kamera nit (_camera_loop) je stvarno prikazuje. Kljuc = ime prozora.
         self.extra_frames = {}
         self._known_extra_windows = set()
+        self.status_lines = []
 
         # trenutna (svaki frejm azurirana) prava 3D pozicija zgloba sake u
         # KAMERA frame-u (metri) -- dobijena RealSense deprojekcijom
@@ -240,6 +238,18 @@ class MediaPipeDevice(Device):
         """
         with self.lock:
             self.extra_frames[name] = image_bgr
+
+
+
+    def update_status(self, lines):
+        """
+        Bezbedno (thread-safe) predaj listu stringova da se prikazu na
+        statusnom panelu u dashboard-u (npr. pozicija hvataljke, status
+        zadatka -- stvari koje samo glavna petlja zna). Isti princip kao
+        update_extra_frame -- ne crta se ovde, samo se cuva za _camera_loop.
+        """
+        with self.lock:
+            self.status_lines = list(lines)
 
 
 
@@ -461,28 +471,58 @@ class MediaPipeDevice(Device):
             if result.hand_world_landmarks and result.hand_landmarks:
 
 
-                world_landmarks = result.hand_world_landmarks[0]
+                # NAPOMENA: hand_world_landmarks se vise NE koristi za
+                # merenje (ni pinch ni pozicija) -- samo se i dalje trazi u
+                # detect_for_video pozivu iznad, uslov ispod ostaje kao
+                # razuman "da li je saka pouzdano detektovana" proveru.
                 image_landmarks = result.hand_landmarks[0]
-
-
-                wrist_world = world_landmarks[0]
                 wrist_image = image_landmarks[0]
 
+                h, w = frame.shape[:2]
+
                 # -------------------------
-                # GRASP DETECTION -- EMA izgladjivanje + histereza (dva praga)
-                # umesto trenutne, nefiltrirane odluke na SVAKI frejm -- jedan
-                # los frejm (okluzija, motion blur) vise NE moze sam da
-                # izazove otpustanje kocke usred hvatanja
+                # GRASP DETECTION -- SADA preko prave RealSense dubine na
+                # oba vrha prsta (isti postupak kao za zglob sake ispod),
+                # umesto MediaPipe-ove naucene hand_world_landmarks procene.
+                #
+                # Razlog izmene: hand_world_landmarks ima priblizno FIKSNU
+                # apsolutnu gresku po vrhu prsta (par mm) -- zanemarljivo za
+                # veliko rastojanje otvorene sake (~8cm), ali DOMINANTNO kad
+                # se meri sitno rastojanje tokom pinch-a (par mm), otud
+                # vrednosti koje jako variraju sa udaljenoscu od kamere.
+                # Prava dubina nema tu manu, ista tehnika koja vec pouzdano
+                # radi za poziciju zgloba.
+                #
+                # EMA izgladjivanje + histereza (dva praga) ostaju
+                # nepromenjeni ispod -- i dalje potrebni protiv sitnog suma,
+                # samo sad na mnogo pouzdanijem sirovom signalu.
                 # -------------------------
 
-                thumb_tip = world_landmarks[4]
-                index_tip = world_landmarks[8]
+                thumb_tip_image = image_landmarks[4]
+                index_tip_image = image_landmarks[8]
 
-                raw_distance = np.sqrt(
-                    (thumb_tip.x - index_tip.x)**2 +
-                    (thumb_tip.y - index_tip.y)**2 +
-                    (thumb_tip.z - index_tip.z)**2
-                )
+                thumb_px = int(np.clip(thumb_tip_image.x * w, 0, w - 1))
+                thumb_py = int(np.clip(thumb_tip_image.y * h, 0, h - 1))
+                index_px = int(np.clip(index_tip_image.x * w, 0, w - 1))
+                index_py = int(np.clip(index_tip_image.y * h, 0, h - 1))
+
+                thumb_depth_m = depth_frame.get_distance(thumb_px, thumb_py)
+                index_depth_m = depth_frame.get_distance(index_px, index_py)
+
+                if thumb_depth_m > 0.0 and index_depth_m > 0.0:
+                    thumb_3d = np.array(rs.rs2_deproject_pixel_to_point(
+                        self.rs_intrinsics, [thumb_px, thumb_py], thumb_depth_m
+                    ))
+                    index_3d = np.array(rs.rs2_deproject_pixel_to_point(
+                        self.rs_intrinsics, [index_px, index_py], index_depth_m
+                    ))
+                    raw_distance = np.linalg.norm(thumb_3d - index_3d)
+                else:
+                    # nevalidna dubina na vrhu prsta (cesto bas TOKOM pinch-a,
+                    # kad prsti delimicno zaklanjaju jedan drugog) -- zadrzi
+                    # PRETHODNU izgladjenu vrednost umesto da racunas sa
+                    # ocigledno pogresnim brojem za ovaj jedan frejm
+                    raw_distance = self._pinch_distance_smooth
 
                 with self.lock:
                     self._pinch_distance_smooth = (
@@ -515,7 +555,6 @@ class MediaPipeDevice(Device):
                 # DEPROJEKCIJA: piksel + prava dubina -> prava 3D tacka
                 # -------------------------
 
-                h, w = frame.shape[:2]
                 px = int(np.clip(wrist_image_pos[0] * w, 0, w - 1))
                 py = int(np.clip(wrist_image_pos[1] * h, 0, h - 1))
 
@@ -598,102 +637,103 @@ class MediaPipeDevice(Device):
 
 
             # -------------------------
-            # display -- flip PRVI, pa TEK ONDA iscrtavanje na flipovanoj
-            # slici (inace se i tekst flipuje pa se cita unazad kao u ogledalu)
+            # display -- prava kamera (RealSense/MediaPipe) se NE prikazuje
+            # (na tvoj zahtev) -- ali TRACKING status i pinch vrednost i
+            # dalje moraju negde da se vide, pa idu u TEKST status panel
+            # umesto da se ispisuju preko slike
             # -------------------------
 
             with self.lock:
 
                 clutch = self._clutch_active
                 stick_display = self.stick.copy()
-
-
-            display_frame = cv2.flip(frame, 1)
-            h, w = display_frame.shape[:2]
-
-
-            text = (
-                "TRACKING"
-                if clutch
-                else
-                "PAUSED"
-            )
-
-
-            color = (
-                (0,255,0)
-                if clutch
-                else
-                (0,0,255)
-            )
-
-
-            cv2.putText(
-                display_frame,
-                text,
-                (20,40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                color,
-                2
-            )
-
-
-            if clutch:
-                cv2.putText(
-                    display_frame,
-                    f"stick: {stick_display.round(3)}",
-                    (20, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 0),
-                    2
-                )
-
-
-
-            if result.hand_landmarks:
-
-                for lm in result.hand_landmarks[0]:
-
-                    # zrcali X (w - x) da se tackica poklopi sa flipovanom slikom
-                    x = w - 1 - int(lm.x * w)
-
-                    y = int(lm.y * h)
-
-
-                    cv2.circle(
-                        display_frame,
-                        (x,y),
-                        3,
-                        (0,255,0),
-                        -1
-                    )
-
-
-
-            cv2.imshow(
-                "MediaPipe Teleoperation",
-                display_frame
-            )
-
-            # -- prikazi sve "extra" slike koje je neko drugi thread predao
-            # preko update_extra_frame() -- SVE cv2.imshow/waitKey pozivi
-            # ostaju u OVOJ jednoj niti, namerno, da se izbegne poznati
-            # OpenCV multi-thread GUI problem (prozori se tiho ne otvaraju)
-            with self.lock:
+                pinch_display = self._pinch_distance_smooth
                 extra_frames_copy = dict(self.extra_frames)
+                status_lines_copy = list(self.status_lines)
 
-            for window_name, img in extra_frames_copy.items():
-                if window_name not in self._known_extra_windows:
-                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-                    cv2.resizeWindow(window_name, 400, 400)
-                    self._known_extra_windows.add(window_name)
-                cv2.imshow(window_name, img)
+
+            device_status_lines = [
+                f"Tracking: {'DA' if clutch else 'ne'}",
+                f"Pinch (glatko): {pinch_display:.4f}",
+                f"  zatvori<{self.GRASP_CLOSE_THRESHOLD:.3f}  otvori>{self.GRASP_OPEN_THRESHOLD:.3f}",
+                f"Stick: {stick_display.round(3)}" if clutch else "Stick: (clutch nije aktivan)",
+                "",
+            ]
+
+            # -- prava kamera, VRACENA u prikaz -- flip PRVI, tackice sa
+            # zrcaljenim X (poklapaju se sa flipovanom slikom), BEZ teksta
+            # preko slike (tekst je vec u status panelu, ne duplira se ovde)
+            real_cam_frame = cv2.flip(frame, 1)
+            if result.hand_landmarks:
+                rh, rw = real_cam_frame.shape[:2]
+                for lm in result.hand_landmarks[0]:
+                    x = rw - 1 - int(lm.x * rw)
+                    y = int(lm.y * rh)
+                    cv2.circle(real_cam_frame, (x, y), 3, (0, 255, 0), -1)
+
+            dashboard = self._build_dashboard(
+                real_cam_frame, extra_frames_copy, device_status_lines + status_lines_copy
+            )
+
+            if "dashboard" not in self._known_extra_windows:
+                cv2.namedWindow("Teleoperacija -- Dashboard", cv2.WINDOW_NORMAL)
+                cv2.resizeWindow("Teleoperacija -- Dashboard", 900, 700)
+                self._known_extra_windows.add("dashboard")
+
+            cv2.imshow("Teleoperacija -- Dashboard", dashboard)
 
 
             cv2.waitKey(1)
 
+
+
+    def _build_dashboard(self, real_camera_frame, extra_frames, status_lines, tile_size=320):
+        """
+        Slaze pravu kameru (RealSense, sa tackicama detekcije sake) +
+        agentview + robot0_eye_in_hand (simulacione kamere) + tekstualni
+        status panel u JEDNU sliku, raspored 2x2.
+
+        sideview NAMERNO nije ovde (redundantan sa agentview za live
+        pregled) -- i dalje se snima za dataset preko camera_names u
+        test_teleoperation.py, samo se ne prikazuje uzivo.
+
+        tile_size je NAMERNO kvadratan (ne pravougaon tile_w/tile_h kao
+        ranije) da odgovara kvadratnoj rezoluciji simulacionih kamera --
+        razvlacenje kvadratne slike u pravougaoni tile je verovatno bio
+        glavni uzrok "uzasnog kvaliteta" (izobljena/razvucena slika).
+        cv2.INTER_CUBIC umesto podrazumevanog INTER_LINEAR za blazi rezultat
+        pri increasingu velicine.
+
+        Napomena: RoboSuite-ov sopstveni ziv 3D prikaz (env.render()) NIJE
+        ovde -- to je poseban nativni MuJoCo viewer, nema sirove piksele
+        dostupne preko cv2, ne moze se ubaciti u ovaj kolaz.
+        """
+        def prep(img, title):
+            if img is None:
+                tile = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+            else:
+                tile = cv2.resize(img, (tile_size, tile_size), interpolation=cv2.INTER_CUBIC)
+            # traka sa naslovom preko vrha, radi citljivosti bez obzira na sadrzaj slike ispod
+            cv2.rectangle(tile, (0, 0), (tile_size, 22), (40, 40, 40), -1)
+            cv2.putText(tile, title, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            return tile
+
+        real_tile = prep(real_camera_frame, "Kamera (ruka)")
+        agent_tile = prep(extra_frames.get("agentview"), "Agentview kamera (sim)")
+        eye_tile = prep(extra_frames.get("robot0_eye_in_hand"), "Wrist kamera (sim)")
+
+        status_tile = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+        cv2.rectangle(status_tile, (0, 0), (tile_size, 22), (40, 40, 40), -1)
+        cv2.putText(status_tile, "Status", (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        for i, line in enumerate(status_lines):
+            cv2.putText(
+                status_tile, str(line), (10, 45 + i * 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1
+            )
+
+        top = np.hstack([real_tile, agent_tile])
+        bottom = np.hstack([eye_tile, status_tile])
+        return np.vstack([top, bottom])
 
 
 
