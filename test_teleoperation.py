@@ -202,6 +202,7 @@ if __name__ == "__main__":
 
             step_count += 1
             success = env.env._check_success()  # env.env: HanoiThree ispod VisualizationWrapper-a
+            legal, illegal_reason = env.env.check_hanoi_legality()
             ee_now = solver.get_eef_position()
             device.update_status([
                 f"Clutch: {'DA' if clutch_now else 'ne'}",
@@ -210,11 +211,13 @@ if __name__ == "__main__":
                 f"Stick: {stick.round(3)}",
                 "",
                 "RESENO! :)" if success else "u toku...",
+                "Legalno: DA" if legal else f"NELEGALNO: {illegal_reason}",
             ])
 
             if step_count % 10 == 0:
                 status = "RESENO! 🎉" if success else "u toku"
-                print(f"clutch={clutch_now}, stick={stick.round(3)}, ee={ee_now.round(3)}, status={status}")
+                legal_str = "OK" if legal else f"NELEGALNO ({illegal_reason})"
+                print(f"clutch={clutch_now}, stick={stick.round(3)}, ee={ee_now.round(3)}, status={status}, legalnost={legal_str}")
 
             if done:
                 print("Epizoda zavrsena, resetujem...")

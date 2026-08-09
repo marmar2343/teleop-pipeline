@@ -417,6 +417,71 @@ class HanoiThree(ManipulationEnv):
             and self._c_on_b()
         )
 
+    def check_hanoi_legality(self, xy_tol=0.03):
+        """
+        Proverava da li je TRENUTNO stanje scene "legalno" po pravilima
+        Hanojskih kula -- za razliku od _check_success() (koja gleda samo
+        da li je zadatak ZAVRSEN), ova metoda se poziva na SVAKOM koraku
+        (ili nad snimljenim stanjima nakon snimanja) da otkrije da li je
+        pravilo ikad prekrseno TOKOM epizode, cak i ako je finalno stanje
+        ispravno.
+
+        Dva pravila se proveravaju:
+          1. Svaka kocka koja trenutno MIRUJE (nije u hvataljci) mora biti
+             unutar tolerancije od JEDNOG od tri klina -- ne bilo gde
+             drugde na stolu.
+          2. Na svakom klinu gde je vise od jedne kocke, moraju biti
+             slozene u ispravnom velicinskom redosledu (veca ispod manje).
+
+        Kocka koju hvataljka trenutno drzi (u vazduhu, u tranzitu) se
+        NE proverava -- to je ocekivano, prelazno stanje, ne krsenje pravila.
+
+        Returns:
+            (is_legal: bool, razlog: str ili None) -- razlog objasnjava
+            SPECIFICNO koje pravilo je prekrseno i gde, korisno za log/debug
+            pri pregledu snimljenih demonstracija.
+        """
+        cubes = {"cubeA": self.cubeA, "cubeB": self.cubeB, "cubeC": self.cubeC}
+        size_rank = {"cubeA": 3, "cubeB": 2, "cubeC": 1}  # vece = fizicki vece
+
+        grasped_name = None
+        for name, cube in cubes.items():
+            if self._check_grasp(gripper=self.robots[0].gripper, object_geoms=cube):
+                grasped_name = name
+                break
+
+        peg_contents = {0: [], 1: [], 2: []}
+        for name, cube in cubes.items():
+            if name == grasped_name:
+                continue  # u vazduhu -- ne proverava se
+
+            pos = self.sim.data.body_xpos[self.obj_body_id[name]]
+            found_peg = None
+            for idx in range(3):
+                if np.linalg.norm(pos[:2] - self._peg_world_xy(idx)) < xy_tol:
+                    found_peg = idx
+                    break
+
+            if found_peg is None:
+                return False, f"{name} nije ni na jednom od tri klina (van dozvoljene zone)"
+
+            peg_contents[found_peg].append((name, pos[2]))
+
+        for idx, items in peg_contents.items():
+            if len(items) < 2:
+                continue
+            items_by_height = sorted(items, key=lambda t: t[1])  # od nize ka visoj
+            for i in range(len(items_by_height) - 1):
+                lower_name = items_by_height[i][0]
+                upper_name = items_by_height[i + 1][0]
+                if size_rank[lower_name] < size_rank[upper_name]:
+                    return False, (
+                        f"na klinu {idx}: {upper_name} (veca) je NA/IZNAD {lower_name} (manje) "
+                        f"-- nelegalno, veca kocka ne sme biti na manjoj"
+                    )
+
+        return True, None
+
     def visualize(self, vis_settings):
         super().visualize(vis_settings=vis_settings)
         if vis_settings["grippers"]:
