@@ -218,3 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 hand_landmarker.task
 demonstracije/
+*.mp4
+stack_three_env.py
+robosuite_test.py
+test_hand.py
