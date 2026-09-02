@@ -1,32 +1,28 @@
 """
 hanoi_three_env.py
 
-Custom RoboSuite okruzenje: PRAVI Hanoj zadatak (premestanje) sa 3 kocke
-umesto diskova sa rupom -- kocke se ne "navlace" na klin, nego se slazu
-na jednu od tri logicke zone (peg) na stolu.
+Custom RoboSuite environment implementing a three-cube Tower of Hanoi task.
 
-Kljucna razlika u odnosu na prvu (pojednostavljenu) verziju stack_three_env.py:
-    - Pocetno stanje NIJE nasumicno razbacano -- kula od sve tri kocke je
-      VEC slozena na izvornom klinu (source_peg_idx), tacno kao u pravom
-      Hanoju.
-    - Cilj je preneti CELU kulu (ukljucujuci najvecu/donju kocku) na ciljni
-      klin (target_peg_idx), ispravnim redosledom (najveca na dnu).
-    - Treci klin ostaje slobodan kao prirodno pomocno mesto -- operater ga
-      koristi po potrebi, ne mora se posebno programirati u environment-u.
+The task uses three cubes instead of conventional disks with holes. The
+cubes are stacked on one of three logical peg regions on the table rather
+than physically mounted onto pegs.
 
-Namerno NEMA guste (dense) nagrade koja vodi kroz optimalno resenje od
-7 poteza -- za snimanje ljudskih demonstracija (teleoperacija) to nije
-potrebno, operater sam resava fizicki zadatak gledajuci scenu. Nagrada je
-uglavnom retka (sparse), sa blagim delimicnim bonusom (partial credit) koji
-moze da posluzi i za eventualno RL poredjenje kasnije.
+The initial state contains the complete three-cube tower on the source peg.
+The objective is to transfer the entire tower to the target peg while
+preserving the required size ordering.
 
-Klinovi su vizuelno obelezeni na stolu -- tanki, ravni "fiducial" markeri
-(CylinderObject sa joints=None, obj_type="visual") koji ne ucestvuju u
-fizici (nema kolizije), isti obrazac koji sam RoboSuite koristi za svoje
-vizuelne fiducijale (npr. MilkVisualObject/BreadVisualObject u PickPlace
-zadatku). Namerno su SVI markeri iste (neutralne) boje -- koji je klin
-"cilj" treba da nosi jezicka instrukcija (za VLA fine-tuning), ne boja,
-jer boja kao signal ne postoji na pravom stolu van simulacije.
+The third peg remains available as an auxiliary location that the operator
+can use when solving the task.
+
+The environment uses sparse rewards by default, with optional partial-credit
+reward shaping. This is suitable for recording human teleoperation
+demonstrations, where the operator solves the task directly rather than
+following a predefined optimal sequence.
+
+Peg locations are represented by thin visual fiducial markers placed on the
+table. These markers are visual-only objects and do not participate in the
+physics simulation. Source and target identities can optionally be
+communicated through marker colors.
 """
 
 import numpy as np
@@ -42,28 +38,30 @@ from robosuite.utils.transform_utils import convert_quat
 
 class HanoiThree(ManipulationEnv):
     """
-    Premestanje kule od tri kocke (opadajuce velicine) sa izvornog na
-    ciljni klin -- Hanojske kule sa pojednostavljenom (kocka umesto diska
-    sa rupom) geometrijom.
+    Three-cube Tower of Hanoi environment with simplified cube geometry.
+
+    The cubes are ordered by size:
+        cubeA: largest and bottom cube
+        cubeB: medium cube
+        cubeC: smallest and top cube
 
     Args:
-        robots (str or list of str): npr. "Panda". Mora biti jedan
-            single-arm robot.
-        controller_configs (dict): konfiguracija kontrolera.
-        source_peg_idx (int): indeks klina (0, 1 ili 2) na kome je kula
-            slozena na pocetku.
-        target_peg_idx (int): indeks klina na koji kula treba da se prenese.
-            Mora biti razlicit od source_peg_idx. Treci (neiskoriscen) klin
-            je automatski dostupan operateru kao pomocno mesto.
-        randomize_pegs (bool): ako je True, source/target se biraju
-            nasumicno (razliciti) pri svakom reset()-u -- korisno za
-            raznovrsnost demonstracija posto je pipeline vec proveren.
-            Ako je False, koriste se fiksne vrednosti iz konstruktora
-            (lakse za debug).
-        peg_spacing (float): rastojanje izmedju susednih klinova (m).
-        reward_shaping (bool): True = blagi "partial credit" tokom zadatka,
-            False = cisto retka nagrada (0 dok se ne zavrsi, onda max).
-        (ostali parametri identicni standardnim robosuite environmentima)
+        robots (str or list of str): Robot model used by the environment.
+            The task expects a single-arm robot, such as "Panda".
+        controller_configs (dict): Robot controller configuration.
+        source_peg_idx (int): Initial peg containing the complete tower.
+            Must be 0, 1, or 2.
+        target_peg_idx (int): Destination peg for the complete tower.
+            Must differ from source_peg_idx.
+        randomize_pegs (bool): If True, source and target pegs are randomly
+            selected on every reset. If False, the constructor values are
+            preserved.
+        peg_spacing (float): Distance between neighboring peg centers in meters.
+        reward_shaping (bool): If True, partial progress receives reward.
+            If False, only a completed task receives a non-zero reward.
+        color_code_pegs (bool): If True, source and target pegs are visually
+            distinguished by color.
+        Other parameters follow the standard RoboSuite environment interface.
     """
 
     def __init__(
@@ -105,8 +103,9 @@ class HanoiThree(ManipulationEnv):
         renderer_config=None,
         seed=None,
     ):
-        assert source_peg_idx != target_peg_idx, "source_peg_idx i target_peg_idx moraju biti razliciti"
-        assert source_peg_idx in (0, 1, 2) and target_peg_idx in (0, 1, 2), "indeksi klinova su 0, 1 ili 2"
+        assert source_peg_idx != target_peg_idx,  "source_peg_idx and target_peg_idx must be different"
+        assert source_peg_idx in (0, 1, 2) and target_peg_idx in (0, 1, 2), "Peg indices must be 0, 1, or 2"
+
 
         self.table_full_size = table_full_size
         self.table_friction = table_friction
@@ -116,8 +115,8 @@ class HanoiThree(ManipulationEnv):
         self.reward_shaping = reward_shaping
         self.use_object_obs = use_object_obs
 
-        # tri logicke pozicije klinova, raspoređene levo-desno (duz y ose)
-        # relativno u odnosu na centar stola
+        # define the three peg centers along the table's y-axis
+        # the offsets are expressed relative to the table center
         self.peg_spacing = peg_spacing
         self.peg_offsets = {
             0: np.array([0.0, -peg_spacing]),
@@ -129,7 +128,8 @@ class HanoiThree(ManipulationEnv):
         self.randomize_pegs = randomize_pegs
         self.color_code_pegs = color_code_pegs
 
-        # polovine ivica kocki (m) -- opadajuce velicine, najveca ide na dno
+        # half-sizes of the cubic objects in meters
+        # the decreasing dimensions enforce the intended size hierarchy        
         self.half_heights = {"cubeA": 0.025, "cubeB": 0.020, "cubeC": 0.015}
 
         super().__init__(
@@ -161,48 +161,44 @@ class HanoiThree(ManipulationEnv):
             seed=seed,
         )
 
-    # ------------------------------------------------------------------
-    # Pomocne geometrijske / provere stanja
-    # ------------------------------------------------------------------
+    # Geometric and state checks
 
     def _peg_world_xy(self, peg_idx):
-        """Apsolutna (x, y) pozicija klina @peg_idx u mujoco world koordinatama."""
+        """Return the absolute world-frame (x, y) position of a peg."""
         return self.table_offset[:2] + self.peg_offsets[peg_idx]
 
     def _cube_at_peg(self, cube, peg_idx, xy_tol=0.03):
-        """True ako je (x, y) pozicija kocke unutar tolerancije od klina."""
+        """Return True if a cube is within xy_tol of the specified peg."""
         pos_xy = np.array(self.sim.data.body_xpos[self.obj_body_id[cube.name]])[:2]
         return np.linalg.norm(pos_xy - self._peg_world_xy(peg_idx)) < xy_tol
 
     def _b_on_a(self):
-        """True ako je cubeB fizicki na cubeA i robot je vise ne drzi."""
+        """Return True if cubeB is resting on cubeA and is not grasped."""
         grasping_b = self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cubeB)
         return (not grasping_b) and self.check_contact(self.cubeB, self.cubeA)
 
     def _c_on_b(self):
-        """True ako je cubeC fizicki na cubeB i robot je vise ne drzi."""
+        """Return True if cubeC is resting on cubeB and is not grasped."""
         grasping_c = self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cubeC)
         return (not grasping_c) and self.check_contact(self.cubeC, self.cubeB)
 
-    # ------------------------------------------------------------------
-    # Nagrada
-    # ------------------------------------------------------------------
 
+    # Reward
     def reward(self, action):
         """
-        Delimicni bonus (partial credit), koristan i za sparse i za shaped rezim:
+        Compute the task reward.
 
-            +1.0  cubeA (najveca, donja) je stigla na ciljni klin
-            +1.0  cubeB je na cubeA (znaci: kula se ponovo gradi na cilju)
-            +2.0  cubeC je na cubeB (kula kompletna -> uspeh)
+        Partial progress is evaluated using the following structure:
 
-        Namerno NE prati posebno svaki od 7 optimalnih poteza -- za
-        snimanje ljudskih demonstracija to nije potrebno; operater sam
-        resava kako da oslobodi cubeA (mora prvo da skloni B i C, verovatno
-        na treci/pomocni klin).
+            +1.0  cubeA reaches the target peg
+            +1.0  cubeB is correctly placed on cubeA
+            +2.0  cubeC is correctly placed on cubeB
 
-        Ako je reward_shaping=False (podrazumevano), nagrada je cisto
-        sparse: 0 dok zadatak nije potpuno zavrsen, max iznos na kraju.
+        Therefore, a fully reconstructed tower receives a total reward of
+        4.0 before reward scaling.
+
+        When reward_shaping is disabled, the reward is sparse: zero is
+        returned until the complete tower is correctly placed at the target.
         """
         reward = 0.0
         if self._cube_at_peg(self.cubeA, self.target_peg_idx):
@@ -220,14 +216,15 @@ class HanoiThree(ManipulationEnv):
 
         return reward
 
-    # ------------------------------------------------------------------
-    # Izgradnja scene
-    # ------------------------------------------------------------------
-
+    # Scene construction
     def _load_model(self):
-        """Sto, robot i tri kocke (bez placement_initializer-a -- pozicije
-        se rucno postavljaju u _reset_internal jer kula mora biti VEC
-        slozena na pocetku, sto standardni random sampler ne podrzava)."""
+        """
+        Construct the table, robot, cubes, and visual peg markers.
+
+        Cube positions are initialized manually during reset so that the
+        three cubes always form a complete tower at the beginning of an
+        episode.
+        """
         super()._load_model()
 
         xpos = self.robots[0].robot_model.base_xpos_offset["table"](self.table_full_size[0])
@@ -270,41 +267,35 @@ class HanoiThree(ManipulationEnv):
         )
         cubes = [self.cubeA, self.cubeB, self.cubeC]
 
-        # Vizuelni markeri za tri klina -- tanki, ravni diskovi bez kolizije
-        # (joints=None znaci "staticno telo", obj_type="visual" znaci "samo
-        # za prikaz, ne ucestvuje u fizici"). Pozicija se postavlja RUCNO na
-        # XML elementu PRE spajanja u scenu (get_obj().set("pos", ...)) jer
-        # staticni objekti nemaju joint preko kog bi se pozicija menjala u
-        # _reset_internal, kao sto to radimo za kocke.
-        #
-        # Boje se OVDE postavljaju SAMO kao pocetna (neutralno sivo)
-        # vrednost -- STVARNO bojenje (kad je color_code_pegs=True) radi
-        # _reset_internal preko sim.model.geom_rgba, na SVAKI reset, sto
-        # ispravno podrzava i randomize_pegs=True (izvor/cilj se mogu
-        # promeniti svaki put, boje prate).
+        # Visual-only markers represent the three logical peg regions.
+        # They are static and non-colliding, so they provide spatial
+        # references without affecting the simulated dynamics.
         self.peg_markers = []
         marker_z = self.table_offset[2] + 0.001  # tik iznad povrsine stola
         for idx, offset in self.peg_offsets.items():
             marker = CylinderObject(
                 name=f"peg{idx}_marker",
-                size=[0.045, 0.001],  # radijus, polovina visine -- vrlo tanak disk
-                rgba=[0.25, 0.25, 0.25, 0.6],  # neutralno sivo, stvarna boja se postavlja u _reset_internal
+                size=[0.045, 0.001],  
+                rgba=[0.25, 0.25, 0.25, 0.6],  
                 joints=None,
-                obj_type="visual",
-            )
+                obj_type="visual",)
             marker_pos = np.array(
-                [self.table_offset[0] + offset[0], self.table_offset[1] + offset[1], marker_z]
-            )
+                [self.table_offset[0] + offset[0], self.table_offset[1] + offset[1], marker_z])
             marker.get_obj().set("pos", array_to_string(marker_pos))
             self.peg_markers.append(marker)
 
         self.model = ManipulationTask(
             mujoco_arena=mujoco_arena,
             mujoco_robots=[robot.robot_model for robot in self.robots],
-            mujoco_objects=cubes + self.peg_markers,
-        )
+            mujoco_objects=cubes + self.peg_markers,)
 
     def _setup_references(self):
+        """
+        Cache MuJoCo body and geometry IDs used during simulation.
+
+        Caching these identifiers avoids repeatedly resolving object and
+        marker names during every simulation step.
+        """
         super()._setup_references()
         self.obj_body_id = {
             "cubeA": self.sim.model.body_name2id(self.cubeA.root_body),
@@ -312,45 +303,45 @@ class HanoiThree(ManipulationEnv):
             "cubeC": self.sim.model.body_name2id(self.cubeC.root_body),
         }
 
-        # geom ID markera klinova, po indeksu (0,1,2) -- za DINAMICKO
-        # bojenje u _reset_internal (bitno kad randomize_pegs=True: boje se
-        # moraju osveziti na SVAKI reset, ne samo jednom pri pravljenju scene)
+        # Store the MuJoCo geometry ID of each visual peg marker so that
+        # marker colors can be updated efficiently during reset.
         self.peg_marker_geom_ids = {}
         for idx, marker in enumerate(self.peg_markers):
             geom_name = marker.visual_geoms[0] if marker.visual_geoms else marker.contact_geoms[0]
             self.peg_marker_geom_ids[idx] = self.sim.model.geom_name2id(geom_name)
 
     def _reset_internal(self):
-        """Postavlja kompletnu, VEC slozenu kulu na izvorni klin (source_peg_idx).
-        Ovo je kljucna razlika u odnosu na standardni robosuite placement_initializer,
-        koji nezavisno randomizuje svaki objekat -- ovde nam treba da sve tri
-        kocke pocnu poravnate/slozene jedna na drugoj."""
+        """
+        Initialize the complete tower on the selected source peg.
+
+        A small common xy perturbation is applied to the entire tower so
+        that the initial configuration is not perfectly identical across
+        randomized resets while keeping all three cubes aligned.
+        """
         super()._reset_internal()
 
         if not self.deterministic_reset:
             if self.randomize_pegs:
                 src, tgt = self.rng.choice(3, size=2, replace=False)
                 self.source_peg_idx, self.target_peg_idx = int(src), int(tgt)
-            # ako randomize_pegs=False, ostaju vrednosti iz konstruktora
 
-            print(f"[HanoiThree] izvorni klin: {self.source_peg_idx}, ciljni klin: {self.target_peg_idx}")
+            print(f"[HanoiThree] source peg: {self.source_peg_idx}, "f"target peg: {self.target_peg_idx}")
 
             if self.color_code_pegs:
                 for idx in range(3):
                     if idx == self.source_peg_idx:
-                        rgba = [0.9, 0.55, 0.1, 0.8]    # narandzasto = IZVOR
+                        rgba = [0.9, 0.55, 0.1, 0.8]    # orange identifies the current source peg
                     elif idx == self.target_peg_idx:
-                        rgba = [0.15, 0.75, 0.15, 0.8]  # zeleno = CILJ
+                        rgba = [0.15, 0.75, 0.15, 0.8]   # orange identifies the current source peg
                     else:
-                        rgba = [0.25, 0.25, 0.25, 0.6]  # neutralno sivo = pomocni
+                        rgba = [0.25, 0.25, 0.25, 0.6]  # gray identifies the auxiliary peg
                     self.sim.model.geom_rgba[self.peg_marker_geom_ids[idx]] = rgba
 
-            # sitan xy jitter (isti za sve tri kocke, da ostanu poravnate) --
-            # sprecava da model nauci fiksnu, uvek identicnu pocetnu pozu
+            # Apply the same xy perturbation to all cubes so that the tower remains vertically aligned after randomization.
             xy = self._peg_world_xy(self.source_peg_idx) + self.rng.uniform(-0.005, 0.005, size=2)
 
-            identity_quat = np.array([1.0, 0.0, 0.0, 0.0])  # (w, x, y, z), bez rotacije
-            z_cursor = self.table_offset[2]  # povrsina stola
+            identity_quat = np.array([1.0, 0.0, 0.0, 0.0])  # (w, x, y, z), without rotation
+            z_cursor = self.table_offset[2] 
 
             for name in ["cubeA", "cubeB", "cubeC"]:
                 half_h = self.half_heights[name]
@@ -358,9 +349,17 @@ class HanoiThree(ManipulationEnv):
                 obj = getattr(self, name)
                 pos = np.array([xy[0], xy[1], z_center])
                 self.sim.data.set_joint_qpos(obj.joints[0], np.concatenate([pos, identity_quat]))
-                z_cursor = z_center + half_h  # vrh ove kocke = dno sledece
+                z_cursor = z_center + half_h  # The top of the current cube becomes the base height for the next cube in the tower
 
     def _setup_observables(self):
+        """
+        Configure object-related observations.
+
+        For each cube, the observation space includes its world-frame
+        position and orientation. The target peg position and relative
+        end-effector-to-object positions are also exposed for downstream
+        control and learning applications.
+        """
         observables = super()._setup_observables()
 
         if self.use_object_obs:
@@ -383,9 +382,8 @@ class HanoiThree(ManipulationEnv):
 
                 sensors += [cube_pos, cube_quat]
 
-            # pozicija ciljnog klina -- korisno kao dodatni signal za VLA model
-            # (npr. "gde treba da zavrsi kula", posto se cilj menja ako
-            # randomize_pegs=True)
+            # Expose the current target peg position so that the target
+            # location remains observable when peg identities are randomized.
             @sensor(modality=modality)
             def target_peg_pos(obs_cache):
                 xy = self._peg_world_xy(self.target_peg_idx)
@@ -407,57 +405,60 @@ class HanoiThree(ManipulationEnv):
 
         return observables
 
-    # ------------------------------------------------------------------
-    # Uspeh i vizuelizacija
-    # ------------------------------------------------------------------
 
+    # Success and visualization
     def _check_success(self):
-        """Kula je uspesno premestena kad je cubeA na CILJNOM klinu, sa
-        cubeB na cubeA i cubeC na cubeB -- tj. cela struktura je ponovo
-        sastavljena, ali na drugom mestu nego na pocetku."""
+        """
+        Return True when the complete tower is correctly placed on the target.
+
+        Success requires:
+            1. cubeA to be located on the target peg,
+            2. cubeB to be resting on cubeA,
+            3. cubeC to be resting on cubeB.
+        """
         return (
             self._cube_at_peg(self.cubeA, self.target_peg_idx)
             and self._b_on_a()
-            and self._c_on_b()
-        )
+            and self._c_on_b())
 
     def check_hanoi_legality(self, xy_tol=0.03):
         """
-        Proverava da li je TRENUTNO stanje scene "legalno" po pravilima
-        Hanojskih kula -- za razliku od _check_success() (koja gleda samo
-        da li je zadatak ZAVRSEN), ova metoda se poziva na SVAKOM koraku
-        (ili nad snimljenim stanjima nakon snimanja) da otkrije da li je
-        pravilo ikad prekrseno TOKOM epizode, cak i ako je finalno stanje
-        ispravno.
+        Validate the current scene against the Tower of Hanoi constraints.
 
-        Dva pravila se proveravaju:
-          1. Svaka kocka koja trenutno MIRUJE (nije u hvataljci) mora biti
-             unutar tolerancije od JEDNOG od tri klina -- ne bilo gde
-             drugde na stolu.
-          2. Na svakom klinu gde je vise od jedne kocke, moraju biti
-             slozene u ispravnom velicinskom redosledu (veca ispod manje).
+        Two conditions are checked:
 
-        Kocka koju hvataljka trenutno drzi (u vazduhu, u tranzitu) se
-        NE proverava -- to je ocekivano, prelazno stanje, ne krsenje pravila.
+            1. Every cube that is not currently grasped must be located
+               within the valid region of one of the three pegs.
+
+            2. Whenever multiple cubes occupy the same peg, they must be
+               stacked in decreasing size order from bottom to top.
+
+        A cube currently held by the gripper is treated as an intermediate
+        state and is therefore excluded from the placement checks.
 
         Returns:
-            (is_legal: bool, razlog: str ili None) -- razlog objasnjava
-            SPECIFICNO koje pravilo je prekrseno i gde, korisno za log/debug
-            pri pregledu snimljenih demonstracija.
+            tuple:
+                is_legal (bool): Whether the current scene satisfies the
+                    defined task constraints.
+                reason (str or None): Description of the first detected
+                    violation, or None when the state is legal.
         """
         cubes = {"cubeA": self.cubeA, "cubeB": self.cubeB, "cubeC": self.cubeC}
-        size_rank = {"cubeA": 3, "cubeB": 2, "cubeC": 1}  # vece = fizicki vece
+        size_rank = {"cubeA": 3, "cubeB": 2, "cubeC": 1}  
 
         grasped_name = None
+
         for name, cube in cubes.items():
             if self._check_grasp(gripper=self.robots[0].gripper, object_geoms=cube):
                 grasped_name = name
                 break
 
         peg_contents = {0: [], 1: [], 2: []}
+
         for name, cube in cubes.items():
             if name == grasped_name:
-                continue  # u vazduhu -- ne proverava se
+                # a grasped cube is temporarily in transit and is not subject to peg-placement constraints
+                continue 
 
             pos = self.sim.data.body_xpos[self.obj_body_id[name]]
             found_peg = None
@@ -467,35 +468,37 @@ class HanoiThree(ManipulationEnv):
                     break
 
             if found_peg is None:
-                return False, f"{name} nije ni na jednom od tri klina (van dozvoljene zone)"
+                return (False, f"{name} is not located on any of the three pegs",)
 
             peg_contents[found_peg].append((name, pos[2]))
 
+        # check the vertical ordering of cubes on every occupied peg
         for idx, items in peg_contents.items():
             if len(items) < 2:
                 continue
-            items_by_height = sorted(items, key=lambda t: t[1])  # od nize ka visoj
+            items_by_height = sorted(items, key=lambda t: t[1]) 
             for i in range(len(items_by_height) - 1):
                 lower_name = items_by_height[i][0]
                 upper_name = items_by_height[i + 1][0]
                 if size_rank[lower_name] < size_rank[upper_name]:
                     return False, (
-                        f"na klinu {idx}: {upper_name} (veca) je NA/IZNAD {lower_name} (manje) "
-                        f"-- nelegalno, veca kocka ne sme biti na manjoj"
+                        f"On peg {idx}, {upper_name} (larger) is "
+                        f"above {lower_name} (smaller)"
                     )
 
         return True, None
 
     def visualize(self, vis_settings):
+        """
+        Add the currently relevant cube to RoboSuite's gripper visualization.
+        """
         super().visualize(vis_settings=vis_settings)
         if vis_settings["grippers"]:
-            # cubeC je (skoro) uvek prvi na potezu jer je na vrhu pocetne kule
+
             self._visualize_gripper_to_target(gripper=self.robots[0].gripper, target=self.cubeC)
 
 
-# ==========================================================================
-# Primer pokretanja / brzi sanity-check
-# ==========================================================================
+# example execution 
 if __name__ == "__main__":
     import time
 
@@ -521,10 +524,15 @@ if __name__ == "__main__":
 
     obs = env.reset()
     print("Observation keys:", list(obs.keys()))
-    print(f"Izvorni klin: {env.source_peg_idx}, ciljni klin: {env.target_peg_idx}")
+    print(
+        f"Source peg: {env.source_peg_idx}, "
+        f"target peg: {env.target_peg_idx}"
+    )
+
 
     for step in range(100):
-        action = np.zeros(env.action_dim)  # placeholder -- ovde ide tvoja IK akcija
+        # Placeholder action for basic environment validation
+        action = np.zeros(env.action_dim)  
         obs, reward, done, info = env.step(action)
         env.render()
         time.sleep(1.0 / env.control_freq)
@@ -533,5 +541,5 @@ if __name__ == "__main__":
         if done:
             obs = env.reset()
 
-    input("Pritisni Enter da zatvoris...")
+    input("Press Enter to close...")
     env.close()
