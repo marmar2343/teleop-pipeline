@@ -50,7 +50,7 @@ pip install -r requirements.txt
 
 **MuJoCo version note:** `robosuite==1.5.2` is not compatible with `mujoco>=3.4` and raises a `TypeError` in `mj_fullM`. Therefore, `requirements.txt` explicitly requires `mujoco==3.3.0`.
 
-### `hand_landmarker.task` -- required manual step
+### `hand_landmarker.task` - required manual step
 
 The MediaPipe hand detection model is not installed through `pip`. It must be downloaded separately as a model file. Without it, `mediapipe_device.py` will fail at startup.
 
@@ -153,3 +153,9 @@ The depth evaluation compares all methods at the **same image pixel**, correspon
 * The monocular depth methods do not necessarily provide a perfectly calibrated absolute depth scale. For this reason, both raw and scale-aligned results are evaluated where applicable.
 * The `mp_size` method is a baseline based on the apparent size of the hand in the image. It provides a relative depth cue rather than a direct metric measurement.
 * Depth estimation is evaluated offline on previously recorded RGB-D sessions, so the camera is not required during the comparison or plotting stages.
+
+## Project Origin
+
+This project was originally developed as part of the undergraduate thesis of Marija Gvozdenović at the University of Belgrade – School of Electrical Engineering (ETF), under the supervision of dr Nikola Knežević, Assistant Professor.
+
+The project is intended to serve as a starting point for further development beyond the scope of the thesis.
