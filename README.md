@@ -7,7 +7,7 @@ The system was tested on the Tower of Hanoi task with 3 cubes, with demonstratio
 ## Repository Structure
 
 ```text
-pipeline/           Core system -- detection, IK, environment, recording
+pipeline/           Core system - detection, IK, environment, recording
 data_collection/    Tools for dataset inspection and statistics
 experiments/        Controller comparison, depth estimation, analysis
 requirements.txt    Required Python packages
@@ -18,8 +18,8 @@ requirements.txt    Required Python packages
 | File                    | Description                                                                   |
 | ----------------------- | ----------------------------------------------------------------------------- |
 | `mediapipe_device.py`   | RealSense + MediaPipe hand detection, rate control and dashboard              |
-| `ik_solver.py`          | `DLS_IK_Solver` -- differential inverse kinematics using damped least squares |
-| `hanoi_three_env.py`    | `HanoiThree` -- custom RoboSuite environment for the task                     |
+| `ik_solver.py`          | `DLS_IK_Solver` - differential inverse kinematics using damped least squares |
+| `hanoi_three_env.py`    | `HanoiThree` - custom RoboSuite environment for the task                     |
 | `run_teleop.py`         | Main script for recording demonstrations to `demo.hdf5`                       |
 | `test_teleoperation.py` | Teleoperation test without recording, used for controller tuning              |
 | `hand_landmarker.task`  | **Download manually** -- see the Installation section below                   |
